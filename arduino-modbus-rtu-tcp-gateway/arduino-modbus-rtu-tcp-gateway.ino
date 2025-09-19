@@ -27,64 +27,79 @@
   v7.3 2024-01-16 Bugfix Modbus RTU Request form, code comments
   v7.4 2024-12-16 CSS improvement, code optimization, simplify DHCP renew, better README (solution to ethernet reset issue)
   v8.0 2025-03-09 Fix 404 error page, code optimization
-  v8.1 2025-03-30 Read away trash coming before slave id
+  v8.1 2025-03-30 Read away trash coming before slave id  
+
+================================================================
+  v8.1 2025-05-12 from https://github.com/budulinek/arduino-modbus-rtu-tcp-gateway  v8.1
+                  add esp32 lib 
+                  use esp WebServer 
+                  add mDNS 
+
 */
 
 const byte VERSION[] = { 8, 1 };
-
-#include <SPI.h>
-#include <Ethernet.h>
-#include <EthernetUdp.h>
-#include <utility/w5100.h>
-#include <CircularBuffer.hpp>  // CircularBuffer https://github.com/rlogiacco/CircularBuffer
-#include <EEPROM.h>
-#include <StreamLib.h>  // StreamLib https://github.com/jandrassy/StreamLib
-
-// these are used by CreateTrulyRandomSeed() function
-#include <avr/interrupt.h>
-#include <avr/wdt.h>
-#include <util/atomic.h>
-
 #include "advanced_settings.h"
 
-typedef struct {
-  byte ip[4];
-  byte subnet[4];
-  byte gateway[4];
-#ifdef ENABLE_DHCP
-  byte dns[4];      // only used if ENABLE_DHCP
-  bool enableDhcp;  // only used if ENABLE_DHCP
+#include <CircularBuffer.hpp>  // CircularBuffer https://github.com/rlogiacco/CircularBuffer
+
+#include <SPI.h>
+#include <ETH.h>
+
+// SPIFFS
+#include <FS.h>
+#include <SPIFFS.h>
+
+#include <WiFi.h>
+#include <WiFiServer.h>        //typedef NetworkServer WiFiServer;
+#include <WiFiUdp.h>           //typedef NetworkUDP WiFiUdp; 
+
+#ifdef ENABLE_EXTENDED_WEBUI
+#include <WebServer.h>
 #endif
+
+#include <ESPmDNS.h>
+
+typedef struct {
+#ifdef ENABLE_DHCP
+  bool enableDhcp;    // only used if ENABLE_DHCP
+//  IPAddress dns;      // only used if ENABLE_DHCP
+#endif
+  IPAddress ip;
+  IPAddress subnet;
+  IPAddress gateway;
   uint16_t tcpPort;
+  bool enableUDP;
   uint16_t udpPort;
-  uint16_t webPort;
-  bool enableRtuOverTcp;
   uint16_t tcpTimeout;
+  bool enableRtuOverTcp;
   uint16_t baud;
-  byte serialConfig;
+  uint32_t serialConfig;
   byte frameDelay;
   uint16_t serialTimeout;
   byte serialAttempts;
+  bool enableBootScan;
+  byte max_slaves;
 } config_t;
 
 const config_t DEFAULT_CONFIG = {
+#ifdef ENABLE_DHCP
+  DEFAULT_DHCP_EN,
+#endif
   DEFAULT_STATIC_IP,
   DEFAULT_SUBMASK,
   DEFAULT_GATEWAY,
-#ifdef ENABLE_DHCP
-  DEFAULT_DNS,
-  DEFAULT_AUTO_IP,
-#endif
   DEFAULT_TCP_PORT,
+  DEFAULT_UDP_EN,
   DEFAULT_UDP_PORT,
-  DEFAULT_WEB_PORT,
-  DEFAULT_RTU_OVER_TCP,
   DEFAULT_TCP_TIMEOUT,
+  DEFAULT_RTU_OVER_TCP,
   DEFAULT_BAUD_RATE,
   DEFAULT_SERIAL_CONFIG,
   DEFAULT_FRAME_DELAY,
   DEFAULT_RESPONSE_TIMEPOUT,
   DEFAULT_ATTEMPTS,
+  DEFAULT_BOOTSCAN_EN,
+  MAX_SLAVES,
 };
 
 enum status_t : byte {
@@ -108,16 +123,16 @@ enum flow_t : byte {
 typedef struct {
   uint32_t eepromWrites;          // Number of EEPROM write cycles (persistent, it is never cleared during factory resets)
   byte major;                     // major version
-  byte mac[6];                    // MAC Address (initial value is random generated)
-  config_t config;                // configuration values
   uint32_t errorCnt[ERROR_LAST];  // array for storing error counters
 #ifdef ENABLE_EXTENDED_WEBUI
   uint32_t rtuCnt[DATA_LAST];  // array for storing RTU data counters
   uint32_t ethCnt[DATA_LAST];  // array for storing ethernet data counters
 #endif                         /* ENABLE_EXTENDED_WEBUI */
+//  config_t config;                // configuration values
 } data_t;
 
 data_t data;
+config_t data_config;
 
 typedef struct {
   byte tid[2];       // MBAP Transaction ID
@@ -137,16 +152,14 @@ CircularBuffer<byte, MAX_QUEUE_DATA> queueData;             // queue of PDU data
 
 
 /****** ETHERNET AND SERIAL ******/
+NetworkServer   *modbusServer_ptr = nullptr;
+NetworkClient   modbusServer_TCP;
 
-byte maxSockNum = MAX_SOCK_NUM;
+NetworkUDP      modbusServer_UDP;
 
-#ifdef ENABLE_DHCP
-bool dhcpSuccess = false;
-#endif /* ENABLE_DHCP */
-
-EthernetUDP Udp;
-EthernetServer modbusServer(DEFAULT_CONFIG.tcpPort);
-EthernetServer webServer(DEFAULT_CONFIG.webPort);
+#ifdef ENABLE_EXTENDED_WEBUI
+WebServer       webServer(DEFAULT_WEB_PORT);
+#endif
 
 /****** TIMERS AND STATE MACHINE ******/
 
@@ -191,12 +204,11 @@ void Timer::sleep(uint32_t sleepTimeMs) {
 MicroTimer recvMicroTimer;
 MicroTimer sendMicroTimer;
 Timer eepromTimer;    // timer to delay writing statistics to EEPROM
-Timer checkEthTimer;  // timer to check SPI connection with ethernet shield
+//Timer checkEthTimer;  // timer to check SPI connection with ethernet shield
 
 #define RS485_TRANSMIT HIGH
 #define RS485_RECEIVE LOW
 
-byte scanCounter = 1;  // Start Modbus RTU scan after boot
 enum state_t : byte {
   IDLE,
   SENDING,
@@ -206,9 +218,9 @@ enum state_t : byte {
 
 byte serialState;
 
-
 /****** RUN TIME AND DATA COUNTERS ******/
 
+byte scanCounter;  // Start Modbus RTU scan after boot
 bool scanReqInQueue = false;  // Scan request is in the queue
 byte priorityReqInQueue;      // Counter for priority requests in the queue
 
@@ -228,27 +240,68 @@ int32_t remaining_seconds;
 // Data counters (we only use uint32_t in ENABLE_EXTENDED_WEBUI, to save flash memory)
 #endif /* ENABLE_EXTENDED_WEBUI */
 
-volatile uint32_t seed1;  // seed1 is generated by CreateTrulyRandomSeed()
-volatile int8_t nrot;
-uint32_t seed2 = 17111989;  // seed2 is static
-
 
 /****** SETUP: RUNS ONCE ******/
 
 void setup() {
-  CreateTrulyRandomSeed();
-  EEPROM.get(DATA_START, data);
-  // is configuration already stored in EEPROM?
-  if (data.major != VERSION[0]) {
+#ifdef DEBUG
+	debugSerial.begin(115200);
+#endif
+
+  SPIFFS.begin(true);  //open fail , auto formate
+
+  if(!eeprom_r("eeprom_b.bin", (byte *) &data, sizeof(data)))
+  {
+    dbgln(F("eeprom_b open fail, reset data.."));
     data.major = VERSION[0];
-    // load default configuration from flash memory
-    data.config = DEFAULT_CONFIG;
-    generateMac();
     resetStats();
-    updateEeprom();
+
+    eeprom_w("eeprom_b.bin", (byte *) &data, sizeof(data));
+    data_config = DEFAULT_CONFIG;
+    eeprom_w("eeprom_c.bin", (byte *) &data_config, sizeof(data_config));
+
+    dbgln("Restarting...");
+    delay(1000);
+    ESP.restart();    
   }
+  else
+  {
+    if (data.major != VERSION[0]) 
+    {
+      data.major = VERSION[0];
+      resetStats();
+
+      eeprom_w("eeprom_b.bin", (byte *) &data, sizeof(data));
+      data_config = DEFAULT_CONFIG;
+      eeprom_w("eeprom_c.bin", (byte *) &data_config, sizeof(data_config));
+
+      dbgln("Restarting...");
+      delay(1000);
+      ESP.restart();    
+    }
+  }
+
+  if(!eeprom_r("eeprom_c.bin", (byte *) &data_config, sizeof(data_config)))
+  {
+    dbgln(F("eeprom_c open fail, reset data.."));
+
+    data_config = DEFAULT_CONFIG;
+    eeprom_w("eeprom_c.bin", (byte *) &data_config, sizeof(data_config));
+
+    dbgln("Restarting...");
+    delay(1000);
+    ESP.restart();    
+  }
+
+  ee_data_out();
+  ee_config_out();
+
+  memset(&slaveStatus, 0, sizeof(slaveStatus));
+
   startSerial();
   startEthernet();
+
+  scanCounter = (data_config.enableBootScan) ? 1 : 0;  // Start Modbus RTU scan after boot  
 }
 
 /****** LOOP ******/
@@ -256,11 +309,12 @@ void setup() {
 void loop() {
 
   scanRequest();
+
   sendSerial();
-  recvUdp();
   recvSerial();
 
   manageSockets();
+
 
   if (EEPROM_INTERVAL > 0 && eepromTimer.isOver() == true) {
     updateEeprom();
@@ -275,10 +329,8 @@ void loop() {
     resetStats();
     updateEeprom();
   }
+
 #ifdef ENABLE_EXTENDED_WEBUI
   maintainUptime();  // maintain uptime in case of millis() overflow
 #endif               /* ENABLE_EXTENDED_WEBUI */
-#ifdef ENABLE_DHCP
-  Ethernet.maintain();
-#endif /* ENABLE_DHCP */
 }

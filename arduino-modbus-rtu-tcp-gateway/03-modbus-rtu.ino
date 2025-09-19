@@ -46,16 +46,33 @@ void sendSerial() {
           crc = 0xFFFF;
         }
         while (mySerial.availableForWrite() > 0 && txNdx < myHeader.msgLen) {
+#ifdef DEBUG
+          {
+          if(0 == txNdx) dbg(F("[rtu_out] = "));
+          byte out_data = queueData[txNdx];
+          debug_hex(&out_data, 1, 0);
+          }
+#endif
           mySerial.write(queueData[txNdx]);
           calculateCRC(queueData[txNdx]);
           txNdx++;
         }
         if (mySerial.availableForWrite() > 1 && txNdx == myHeader.msgLen) {
+#ifdef DEBUG
+          {
+          byte out_data = lowByte(crc);
+          debug_hex(&out_data, 1, 0);
+          out_data = highByte(crc);
+          debug_hex(&out_data, 1, 0);
+          dbgln(F(" "));
+          }
+#endif
           mySerial.write(lowByte(crc));  // send CRC, low byte first
           mySerial.write(highByte(crc));
           txNdx++;
         }
-        if (mySerial.availableForWrite() == SERIAL_TX_BUFFER_SIZE - 1 && txNdx > myHeader.msgLen) {
+//        if (mySerial.availableForWrite() == SERIAL_TX_BUFFER_SIZE - 1 && txNdx > myHeader.msgLen) {
+        if (mySerial.availableForWrite() >= (SERIAL_TX_BUFFER_SIZE - 1) && txNdx > myHeader.msgLen) {
           // wait for last byte (incl. CRC) to be sent from serial Tx buffer
           // this if statement is not very reliable (too fast)
           // Serial.isFlushed() method is needed....see https://github.com/arduino/Arduino/pull/3737
@@ -80,7 +97,7 @@ void sendSerial() {
         myHeader.atts++;
         queueHeaders.shift();
         queueHeaders.unshift(myHeader);
-        uint32_t delay = data.config.serialTimeout;
+        uint32_t delay = data_config.serialTimeout;
         if (myHeader.requestType & SCAN_REQUEST) delay = SCAN_TIMEOUT;  // fixed timeout for scan requests
         sendMicroTimer.sleep(delay * 1000UL);
         serialState++;
@@ -90,7 +107,7 @@ void sendSerial() {
       {
         if (myHeader.requestType & SCAN_REQUEST) {  // Only one attempt for scan request (we do not count attempts)
           deleteRequest();
-        } else if (myHeader.atts >= data.config.serialAttempts) {
+        } else if (myHeader.atts >= data_config.serialAttempts) {
           // send modbus error 0x0B (Gateway Target Device Failed to Respond) - usually means that target device (address) is not present
           setSlaveStatus(queueData[0], SLAVE_ERROR_0B, true, false);
           byte MBAP[] = { myHeader.tid[0],
@@ -125,11 +142,11 @@ void sendSerial() {
 void recvSerial() {
   static uint8_t rxNdx = 0;
   static byte serialIn[MODBUS_SIZE];
+
   while (mySerial.available() > 0) {
     byte b = mySerial.read();
     if (rxNdx == 0 && queueData[0] != b) { // TODO maybe duplicate check? See the check bellow.
-      if (recvMicroTimer.isOver())
-        break;
+      if (recvMicroTimer.isOver()) break;
       // wait a bit to the buffer to clean up
       recvMicroTimer.sleep(charTimeOut());
       data.errorCnt[ERROR_RTU]++;
@@ -138,9 +155,14 @@ void recvSerial() {
       rxNdx++;
     }  // if frame longer than maximum allowed, CRC will fail and data.errorCnt[ERROR_RTU] will be recorded down the road
     recvMicroTimer.sleep(charTimeOut());
-    sendMicroTimer.sleep(data.config.frameDelay * 1000UL);  // delay next serial write
+    sendMicroTimer.sleep(data_config.frameDelay * 1000UL);  // delay next serial write
   }
+
   if (recvMicroTimer.isOver() && rxNdx != 0) {
+#ifdef DEBUG
+    dbg(F("[rtu_in] = "));
+    debug_hex(serialIn, rxNdx, 1);
+#endif    
     // Process Serial data
     // Checks: 1) CRC; 2) address of incoming packet against first request in queue; 3) only expected responses are forwarded to TCP/UDP
     header_t myHeader = queueHeaders.first();
@@ -179,32 +201,102 @@ void sendResponse(const byte MBAP[], const byte PDU[], const uint16_t pduLength)
     }
     responseLen++;
   }
+
   if (myHeader.requestType & UDP_REQUEST) {
-    Udp.beginPacket(myHeader.remIP, myHeader.remPort);
-    if (data.config.enableRtuOverTcp) Udp.write(PDU, pduLength);
-    else {
-      Udp.write(MBAP, 6);
-      Udp.write(PDU, pduLength - 2);  //send without CRC
+    modbusServer_UDP.beginPacket(myHeader.remIP, myHeader.remPort);
+    if (data_config.enableRtuOverTcp)
+    {
+#ifdef DEBUG
+      {
+      dbg(F("[rtu_over_udp_out] = "));
+
+      byte out_data;  
+      for(byte cnt = 0; cnt < pduLength; cnt++) 
+      {
+        out_data = PDU[cnt];
+        debug_hex(&out_data, 1, 0);
+      }
+      dbgln(F(" "));
+      }
+#endif      
+     modbusServer_UDP.write(PDU, pduLength);
     }
-    Udp.endPacket();
+    else {
+#ifdef DEBUG
+      {
+      dbg(F("[udp_out] = "));
+
+      byte out_data;  
+      for(byte cnt = 0; cnt < 6; cnt++) 
+      {
+        out_data = MBAP[cnt];
+        debug_hex(&out_data, 1, 0);
+      }
+
+      for(byte cnt = 0; cnt < (pduLength - 2); cnt++) 
+      {
+        out_data = PDU[cnt];
+        debug_hex(&out_data, 1, 0);
+      }
+      dbgln(F(" "));
+      }
+#endif      
+      modbusServer_UDP.write(MBAP, 6);
+      modbusServer_UDP.write(PDU, pduLength - 2);  //send without CRC
+    }
+    modbusServer_UDP.endPacket();
 #ifdef ENABLE_EXTENDED_WEBUI
     data.ethCnt[DATA_TX] += pduLength;
-    if (!data.config.enableRtuOverTcp) data.ethCnt[DATA_TX] += 4;
+    if (!data_config.enableRtuOverTcp) data.ethCnt[DATA_TX] += 4;
 #endif /* ENABLE_EXTENDED_WEBUI */
   } else if (myHeader.requestType & TCP_REQUEST) {
     byte sock = myHeader.requestType & TCP_REQUEST_MASK;
-    EthernetClient client = EthernetClient(sock);
-    if (W5100.readSnSR(sock) == SnSR::ESTABLISHED && W5100.readSnDPORT(sock) == myHeader.remPort) {  // Check remote port should be enough or check also rem IP?
-      if (data.config.enableRtuOverTcp) client.write(PDU, pduLength);
-      else {
-        client.write(MBAP, 6);
-        client.write(PDU, pduLength - 2);  //send without CRC
+    //NetworkClient tcp_client = modbusServer.available();
+
+    if (data_config.enableRtuOverTcp)
+    {
+#ifdef DEBUG
+      {
+      dbg(F("[rtu_over_tcp_out] = "));
+
+      byte out_data;  
+      for(byte cnt = 0; cnt < pduLength; cnt++) 
+      {
+        out_data = PDU[cnt];
+        debug_hex(&out_data, 1, 0);
       }
+      dbgln(F(" "));
+      }
+#endif      
+      modbusServer_TCP.write(PDU, pduLength);
+    }
+    else {
+#ifdef DEBUG
+      {
+      dbg(F("[tcp_out] = "));
+
+      byte out_data;  
+      for(byte cnt = 0; cnt < 6; cnt++) 
+      {
+        out_data = MBAP[cnt];
+        debug_hex(&out_data, 1, 0);
+      }
+
+      for(byte cnt = 0; cnt < (pduLength - 2); cnt++) 
+      {
+        out_data = PDU[cnt];
+        debug_hex(&out_data, 1, 0);
+      }
+      dbgln(F(" "));
+      }
+#endif      
+      modbusServer_TCP.write(MBAP, 6);
+      modbusServer_TCP.write(PDU, pduLength - 2);  //send without CRC
+    }
 #ifdef ENABLE_EXTENDED_WEBUI
-      data.ethCnt[DATA_TX] += pduLength;
-      if (!data.config.enableRtuOverTcp) data.ethCnt[DATA_TX] += 4;
+    data.ethCnt[DATA_TX] += pduLength;
+    if (!data_config.enableRtuOverTcp) data.ethCnt[DATA_TX] += 4;
 #endif /* ENABLE_EXTENDED_WEBUI */
-    }  // TODO TCP Connection Error
   }    // else SCAN_REQUEST (no data.ethCnt[DATA_TX], but yes delete request)
   deleteRequest();
 }

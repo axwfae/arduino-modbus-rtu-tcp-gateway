@@ -45,7 +45,7 @@ uint16_t crc;
 */
 /**************************************************************************/
 void recvUdp() {
-  uint16_t msgLength = Udp.parsePacket();
+  uint16_t msgLength = modbusServer_UDP.parsePacket();
   if (msgLength) {
 #ifdef ENABLE_EXTENDED_WEBUI
     data.ethCnt[DATA_RX] += msgLength;
@@ -54,32 +54,32 @@ void recvUdp() {
                                      // Modbus TCP/UDP frame: [0][1] transaction ID, [2][3] protocol ID, [4][5] length and [6] unit ID (address)..... no CRC
                                      // Modbus RTU frame: [0] address.....[n-1][n] CRC
     memset(inBuffer, 0, sizeof(inBuffer));
-    Udp.read(inBuffer, sizeof(inBuffer));
-    while (Udp.available()) Udp.read();
-    byte errorCode = checkRequest(inBuffer, msgLength, (uint32_t)Udp.remoteIP(), Udp.remotePort(), UDP_REQUEST);
+    modbusServer_UDP.read(inBuffer, sizeof(inBuffer));
+    while (modbusServer_UDP.available()) modbusServer_UDP.read();
+    byte errorCode = checkRequest(inBuffer, msgLength, (uint32_t)modbusServer_UDP.remoteIP(), modbusServer_UDP.remotePort(), UDP_REQUEST);
     if (errorCode) {
       // send back message with error code
-      Udp.beginPacket(Udp.remoteIP(), Udp.remotePort());
-      if (!data.config.enableRtuOverTcp) {
-        Udp.write(inBuffer, 5);
-        Udp.write(0x03);
+      modbusServer_UDP.beginPacket(modbusServer_UDP.remoteIP(), modbusServer_UDP.remotePort());
+      if (!data_config.enableRtuOverTcp) {
+        modbusServer_UDP.write(inBuffer, 5);
+        modbusServer_UDP.write(0x03);
       }
-      byte addressPos = 6 * !data.config.enableRtuOverTcp;  // position of slave address in the incoming TCP/UDP message (0 for Modbus RTU over TCP/UDP and 6 for Modbus RTU over TCP/UDP)
-      Udp.write(inBuffer[addressPos]);                      // address
-      Udp.write(inBuffer[addressPos + 1] + 0x80);           // function + 0x80
-      Udp.write(errorCode);
-      if (data.config.enableRtuOverTcp) {
+      byte addressPos = 6 * !data_config.enableRtuOverTcp;  // position of slave address in the incoming TCP/UDP message (0 for Modbus RTU over TCP/UDP and 6 for Modbus RTU over TCP/UDP)
+      modbusServer_UDP.write(inBuffer[addressPos]);                      // address
+      modbusServer_UDP.write(inBuffer[addressPos + 1] + 0x80);           // function + 0x80
+      modbusServer_UDP.write(errorCode);
+      if (data_config.enableRtuOverTcp) {
         crc = 0xFFFF;
         calculateCRC(inBuffer[addressPos]);
         calculateCRC(inBuffer[addressPos + 1] + 0x80);
         calculateCRC(errorCode);
-        Udp.write(lowByte(crc));  // send CRC, low byte first
-        Udp.write(highByte(crc));
+        modbusServer_UDP.write(lowByte(crc));  // send CRC, low byte first
+        modbusServer_UDP.write(highByte(crc));
       }
-      Udp.endPacket();
+      modbusServer_UDP.endPacket();
 #ifdef ENABLE_EXTENDED_WEBUI
       data.ethCnt[DATA_TX] += 5;
-      if (!data.config.enableRtuOverTcp) data.ethCnt[DATA_TX] += 4;
+      if (!data_config.enableRtuOverTcp) data.ethCnt[DATA_TX] += 4;
 #endif /* ENABLE_EXTENDED_WEBUI */
     }
   }
@@ -90,8 +90,12 @@ void recvUdp() {
   @brief Receives Modbus TCP (or Modbus RTU over TCP) messages, calls @ref checkRequest()
 */
 /**************************************************************************/
-void recvTcp(EthernetClient &client) {
-  uint16_t msgLength = client.available();
+void recvTcp() {
+
+  uint16_t msgLength = modbusServer_TCP.available();
+
+  if(0 == msgLength) return;
+
 #ifdef ENABLE_EXTENDED_WEBUI
   data.ethCnt[DATA_RX] += msgLength;
 #endif                             /* ENABLE_EXTENDED_WEBUI */
@@ -99,23 +103,30 @@ void recvTcp(EthernetClient &client) {
                                    // Modbus TCP/UDP frame: [0][1] transaction ID, [2][3] protocol ID, [4][5] length and [6] unit ID (address).....
                                    // Modbus RTU frame: [0] address.....
   memset(inBuffer, 0, sizeof(inBuffer));
-  client.read(inBuffer, sizeof(inBuffer));
-  while (client.available()) client.read();
-  byte errorCode = checkRequest(inBuffer, msgLength, {}, client.remotePort(), TCP_REQUEST | client.getSocketNumber());
+  modbusServer_TCP.read(inBuffer, sizeof(inBuffer));
+  while (modbusServer_TCP.available()) modbusServer_TCP.read();
+
+#ifdef DEBUG
+  dbg(F("[tcp_in] = "));
+  debug_hex(inBuffer, msgLength, 1);
+#endif
+
+  //byte errorCode = checkRequest(inBuffer, msgLength, {}, client.remotePort(), TCP_REQUEST | client.getSocketNumber());
+  byte errorCode = checkRequest(inBuffer, msgLength, {}, modbusServer_TCP.remotePort(), TCP_REQUEST);
   if (errorCode) {
     // send back message with error code
     byte i = 0;
     byte outBuffer[9];
-    if (!data.config.enableRtuOverTcp) {
+    if (!data_config.enableRtuOverTcp) {
       memcpy(outBuffer, inBuffer, 5);
       outBuffer[5] = 0x03;
       i = 6;
     }
-    byte addressPos = 6 * !data.config.enableRtuOverTcp;  // position of slave address in the incoming TCP/UDP message (0 for Modbus RTU over TCP/UDP and 6 for Modbus RTU over TCP/UDP)
+    byte addressPos = 6 * !data_config.enableRtuOverTcp;  // position of slave address in the incoming TCP/UDP message (0 for Modbus RTU over TCP/UDP and 6 for Modbus RTU over TCP/UDP)
     outBuffer[i++] = inBuffer[addressPos];                // address
     outBuffer[i++] = inBuffer[addressPos + 1] + 0x80;     // function + 0x80
     outBuffer[i++] = errorCode;
-    if (data.config.enableRtuOverTcp) {
+    if (data_config.enableRtuOverTcp) {
       crc = 0xFFFF;
       calculateCRC(inBuffer[addressPos]);
       calculateCRC(inBuffer[addressPos + 1] + 0x80);
@@ -123,14 +134,18 @@ void recvTcp(EthernetClient &client) {
       outBuffer[i++] = lowByte(crc);  // send CRC, low byte first
       outBuffer[i++] = highByte(crc);
     }
-    client.write(outBuffer, i);
+    modbusServer_TCP.write(outBuffer, i);
+#ifdef DEBUG
+    dbg(F("[tcp_out_err] = "));
+    debug_hex(outBuffer, i, 1);
+#endif
+
 #ifdef ENABLE_EXTENDED_WEBUI
     data.ethCnt[DATA_TX] += 5;
-    if (!data.config.enableRtuOverTcp) data.ethCnt[DATA_TX] += 4;
+    if (!data_config.enableRtuOverTcp) data.ethCnt[DATA_TX] += 4;
 #endif /* ENABLE_EXTENDED_WEBUI */
   }
 }
-
 
 void scanRequest() {
   // Insert scan request into queue, allow only one scan request in a queue
@@ -156,7 +171,7 @@ void scanRequest() {
       scanCommand[0] = SCAN_FUNCTION_FIRST;
       scanCounter++;
     }
-    if (scanCounter == MAX_SLAVES + 1) scanCounter = 0;
+    if (scanCounter == data_config.max_slaves + 1) scanCounter = 0;
   }
 }
 
@@ -174,8 +189,8 @@ void scanRequest() {
 */
 /**************************************************************************/
 byte checkRequest(byte inBuffer[], uint16_t msgLength, const uint32_t remoteIP, const uint16_t remotePort, byte requestType) {
-  byte addressPos = 6 * !data.config.enableRtuOverTcp;  // position of slave address in the incoming TCP/UDP message (0 for Modbus RTU over TCP/UDP and 6 for Modbus RTU over TCP/UDP)
-  if (data.config.enableRtuOverTcp) {                   // check CRC for Modbus RTU over TCP/UDP
+  byte addressPos = 6 * !data_config.enableRtuOverTcp;  // position of slave address in the incoming TCP/UDP message (0 for Modbus RTU over TCP/UDP and 6 for Modbus RTU over TCP/UDP)
+  if (data_config.enableRtuOverTcp) {                   // check CRC for Modbus RTU over TCP/UDP
     if (checkCRC(inBuffer, msgLength) == false) {
       data.errorCnt[ERROR_TCP]++;
       return 0;  // drop request and do not return any error code
@@ -186,7 +201,7 @@ byte checkRequest(byte inBuffer[], uint16_t msgLength, const uint32_t remoteIP, 
       return 0;  // drop request and do not return any error code
     }
   }
-  msgLength = msgLength - addressPos - (2 * data.config.enableRtuOverTcp);  // in Modbus RTU over TCP/UDP do not store CRC
+  msgLength = msgLength - addressPos - (2 * data_config.enableRtuOverTcp);  // in Modbus RTU over TCP/UDP do not store CRC
   // check if we have space in request queue
   if (queueHeaders.available() < 1 || queueData.available() < msgLength) {
     setSlaveStatus(inBuffer[addressPos], SLAVE_ERROR_0A, true, false);
@@ -207,9 +222,10 @@ byte checkRequest(byte inBuffer[], uint16_t msgLength, const uint32_t remoteIP, 
     requestType = requestType | SCAN_REQUEST;  // Treat broadcast as scan (only one attempt, short timeout, do not expect response)
   }
   // all checkes passed OK, we can store the incoming data in request queue
-  if (requestType & TCP_REQUEST) {
-    socketInQueue[requestType & TCP_REQUEST_MASK]++;
-  }
+//  if (requestType & TCP_REQUEST) {
+//    socketInQueue[requestType & TCP_REQUEST_MASK]++;
+//  }
+
   // Store in request queue
   queueHeaders.push(header_t{
     { inBuffer[0], inBuffer[1] },  // tid[2] (ignored in Modbus RTU over TCP/UDP)
@@ -231,7 +247,7 @@ void deleteRequest()  // delete request from queue
 {
   header_t myHeader = queueHeaders.first();
   if (myHeader.requestType & SCAN_REQUEST) scanReqInQueue = false;
-  if (myHeader.requestType & TCP_REQUEST) socketInQueue[myHeader.requestType & TCP_REQUEST_MASK]--;
+//  if (myHeader.requestType & TCP_REQUEST) socketInQueue[myHeader.requestType & TCP_REQUEST_MASK]--;
   if (myHeader.requestType & PRIORITY_REQUEST) priorityReqInQueue--;
   for (byte i = 0; i < myHeader.msgLen; i++) {
     queueData.shift();
@@ -244,18 +260,18 @@ void clearQueue() {
   queueData.clear();
   scanReqInQueue = false;
   priorityReqInQueue = false;
-  memset(socketInQueue, 0, sizeof(socketInQueue));
+//  memset(socketInQueue, 0, sizeof(socketInQueue));
   memset(slaveStatus[SLAVE_ERROR_0B_QUEUE], 0, sizeof(slaveStatus[SLAVE_ERROR_0B_QUEUE]));
   sendMicroTimer.sleep(0);
 }
 
 bool getSlaveStatus(const byte slave, const byte status) {
-  if (slave >= MAX_SLAVES) return false;  // error
-  return (slaveStatus[status][slave / 8] & masks[slave & 7]) > 0;
+  if (slave >= data_config.max_slaves) return false;  // error
+  return ((slaveStatus[status][slave / 8] & masks[slave & 7]) > 0);
 }
 
 void setSlaveStatus(const byte slave, byte status, const bool value, const bool isScan) {
-  if (slave >= MAX_SLAVES || status > SLAVE_ERROR_0B_QUEUE) return;  // error
+  if (slave >= data_config.max_slaves || status > SLAVE_ERROR_0B_QUEUE) return;  // error
   if (value == 0) {
     slaveStatus[status][slave / 8] &= ~masks[slave & 7];
   } else {

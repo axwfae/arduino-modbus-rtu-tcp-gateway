@@ -1,429 +1,745 @@
-const byte URI_SIZE = 24;   // a smaller buffer for uri
-const byte POST_SIZE = 24;  // a smaller buffer for single post parameter + key
+#include "web_pages.h"
 
-// Actions that need to be taken after saving configuration.
-enum action_type : byte {
-  ACT_NONE,
-  ACT_DEFAULT,        // Load default factory settings (but keep MAC address)
-  ACT_MAC,            // Generate new random MAC
-  ACT_REBOOT,         // Reboot the microcontroller
-  ACT_RESET_ETH,      // Ethernet reset
-  ACT_RESET_SERIAL,   // Serial reset
-  ACT_SCAN,           // Initialize RTU scan
-  ACT_RESET_STATS,    // Reset Modbus Statistics
-  ACT_CLEAR_REQUEST,  // Clear Modbus Request form
-  ACT_WEB             // Restart webserver
-};
-enum action_type action;
+void handleNotFound() {
+  String message = "File Not Found\n\n";
+  message += "URI: ";
+  message += webServer.uri();
+  message += "\nMethod: ";
+  message += (webServer.method() == HTTP_GET) ? "GET" : "POST";
+  message += "\nArguments: ";
+  message += webServer.args();
+  message += "\n";
 
-// Pages served by the webserver. Order of elements defines the order in the left menu of the web UI.
-// URL of the page (*.htm) contains number corresponding to its position in this array.
-// The following enum array can have a maximum of 10 elements (incl. PAGE_NONE and PAGE_WAIT)
-enum page : byte {
-  PAGE_ERROR,  // 404 Error
-  PAGE_INFO,
-  PAGE_STATUS,
-  PAGE_IP,
-  PAGE_TCP,
-  PAGE_RTU,
-  PAGE_TOOLS,
-  PAGE_WAIT,  // page with "Reloading. Please wait..." message.
-  PAGE_DATA,  // d.json
-};
-
-// Keys for POST parameters, used in web forms and processed by processPost() function.
-// Using enum ensures unique identification of each POST parameter key and consistence across functions.
-// In HTML code, each element will apear as number corresponding to its position in this array.
-enum post_key : byte {
-  POST_NONE,  // reserved for NULL
-  POST_DHCP,  // enable DHCP
-  POST_MAC,
-  POST_MAC_1,
-  POST_MAC_2,
-  POST_MAC_3,
-  POST_MAC_4,
-  POST_MAC_5,
-  POST_IP,
-  POST_IP_1,
-  POST_IP_2,
-  POST_IP_3,  // IP address         || Each part of an IP address has its own POST parameter.     ||
-  POST_SUBNET,
-  POST_SUBNET_1,
-  POST_SUBNET_2,
-  POST_SUBNET_3,  // subnet             || Because HTML code for IP, subnet, gateway and DNS          ||
-  POST_GATEWAY,
-  POST_GATEWAY_1,
-  POST_GATEWAY_2,
-  POST_GATEWAY_3,  // gateway            || is generated through one (nested) for-loop,                ||
-  POST_DNS,
-  POST_DNS_1,
-  POST_DNS_2,
-  POST_DNS_3,        // DNS                || all these 16 enum elements must be listed in succession!!  ||
-  POST_TCP,          // TCP port                  || Because HTML code for these 3 ports              ||
-  POST_UDP,          // UDP port                  || is generated through one for-loop,               ||
-  POST_WEB,          // web UI port               || these 3 elements must be listed in succession!!  ||
-  POST_RTU_OVER,     // RTU over TCP/UDP
-  POST_TCP_TIMEOUT,  // Modbus TCP socket close timeout
-  POST_BAUD,         // baud rate
-  POST_DATA,         // data bits
-  POST_PARITY,       // parity
-  POST_STOP,         // stop bits
-  POST_FRAMEDELAY,   //frame delay
-  POST_TIMEOUT,      // response timeout
-  POST_ATTEMPTS,     // number of request attempts
-  POST_REQ,          // Modbus request send from WebUI (first byte)
-  POST_REQ_1,
-  POST_REQ_2,
-  POST_REQ_3,
-  POST_REQ_4,
-  POST_REQ_5,
-  POST_REQ_6,
-  POST_REQ_LAST,  // 8 bytes in total
-  POST_ACTION,    // actions on Tools page
-};
-
-byte request[POST_REQ_LAST - POST_REQ + 1];  // Array to store Modbus request sent from WebUI
-byte requestLen = 0;                         // Length of the Modbus request send from WebUI
-
-
-// Keys for JSON elements, used in: 1) JSON documents, 2) ID of span tags, 3) Javascript.
-enum JSON_type : byte {
-  JSON_TIME,  // Runtime seconds
-  JSON_RTU_DATA,
-  JSON_ETH_DATA,
-  JSON_RESPONSE,
-  JSON_STATS,  // Modbus statistics from array data.errorCnt[]
-  JSON_QUEUE,
-  JSON_TCP_UDP_MASTERS,  // list of Modbus TCP/UDP masters separated by <br>
-  JSON_SLAVES,           // list of Modbus RTU slaves separated by <br>
-  JSON_SOCKETS,
-  JSON_LAST,  // Must be the very last element in this array
-};
-
-/**************************************************************************/
-/*!
-  @brief Receives GET requests for web pages, receives POST data from web forms,
-  calls @ref processPost() function, sends web pages. For simplicity, all web pages
-  should are numbered (1.htm, 2.htm, ...), the page number is passed to 
-  the @ref sendPage() function. Also executes actions (such as ethernet restart,
-  reboot) during "please wait" web page.
-  @param client Ethernet TCP client.
-*/
-/**************************************************************************/
-void recvWeb(EthernetClient &client) {
-  char uri[URI_SIZE];  // the requested page
-  memset(uri, 0, sizeof(uri));
-  while (client.available()) {        // start reading the first line which should look like: GET /uri HTTP/1.1
-    if (client.read() == ' ') break;  // find space before /uri
-  }
-  byte len = 0;
-  while (client.available() && len < sizeof(uri) - 1) {
-    char c = client.read();  // parse uri
-    if (c == ' ') break;     // find space after /uri
-    uri[len] = c;
-    len++;
-  }
-  while (client.available()) {
-    if (client.read() == '\r')
-      if (client.read() == '\n')
-        if (client.read() == '\r')
-          if (client.read() == '\n')
-            break;  // find 2 end of lines between header and body
-  }
-  if (client.available()) {
-    processPost(client);  // parse post parameters
+  for (uint8_t i = 0; i < webServer.args(); i++) {
+    message += " " + webServer.argName(i) + ": " + webServer.arg(i) + "\n";
   }
 
-  // Get the requested page from URI
-  byte reqPage = PAGE_ERROR;  // requested page, 404 error is a default
-  if (uri[0] == '/') {
-    if (uri[1] == '\0') {
-      reqPage = PAGE_INFO;  // Homepage
-    } else if (uri[1] >= '0' && uri[1] <= '9' && strcmp(uri + 2, ".htm") == 0) {
-      reqPage = byte(uri[1] - '0');  // Convert ASCII digit to byte
-      if (reqPage > PAGE_WAIT) reqPage = PAGE_ERROR;
-    } else if (strcmp(uri, "/d.json") == 0) {
-      reqPage = PAGE_DATA;
-    }
-  }
-  // Actions that require "please wait" page
-  if (action == ACT_WEB || action == ACT_MAC || action == ACT_RESET_ETH || action == ACT_REBOOT || action == ACT_DEFAULT) {
-    reqPage = PAGE_WAIT;
-  }
-  // Send page
-  sendPage(client, reqPage);
-
-  // Do all actions before the "please wait" redirects (5s delay at the moment)
-  if (reqPage == PAGE_WAIT) {
-    delay(500);  // wait for the wait page to load
-    switch (action) {
-      case ACT_WEB:
-        for (byte s = 0; s < maxSockNum; s++) {
-          // close old webserver TCP connections
-          if (EthernetClient(s).localPort() != data.config.tcpPort) {
-            disconSocket(s);
-          }
-        }
-        webServer = EthernetServer(data.config.webPort);
-        break;
-      case ACT_MAC:
-      case ACT_RESET_ETH:
-        for (byte s = 0; s < maxSockNum; s++) {
-          // close all TCP and UDP sockets
-          disconSocket(s);
-        }
-        startEthernet();
-        break;
-      case ACT_REBOOT:
-      case ACT_DEFAULT:
-        resetFunc();
-        break;
-      default:
-        break;
-    }
-  }
-  action = ACT_NONE;
+  webServer.send(404, "text/plain", message);
+  dbgln(F("[web] response 404 file not found"));
 }
 
-/**************************************************************************/
-/*!
-  @brief Processes POST data from forms and buttons, updates data.config (in RAM)
-  and saves config into EEPROM. Executes actions which do not require webserver restart
-  @param client Ethernet TCP client.
-*/
-/**************************************************************************/
-void processPost(EthernetClient &client) {
-  while (client.available()) {
-    char post[POST_SIZE];
-    byte len = 0;
-    while (client.available() && len < sizeof(post) - 1) {
-      char c = client.read();
-      if (c == '&') break;
-      post[len] = c;
-      len++;
+void web_status() {
+  String htmlContent = webpage;
+  String function_html = status_page;
+  String data_converter =" ";
+  String scan_cmd;
+
+  htmlContent.replace("PAGE_REFRESH", "http-equiv=refresh content=2");
+
+  String mdns_name = DEFAULT_mDns_NAME_HEAD;
+
+  byte macBuffer[6];
+  ETH.macAddress(macBuffer);
+
+  for (byte i = 0; i < 6; i++) {
+    if (macBuffer[i] < 16) data_converter += F("0");
+    data_converter += String(macBuffer[i], HEX);
+    if(i > 2)
+    {
+      if (macBuffer[i] < 16) mdns_name += F("0");
+      mdns_name +=  String(macBuffer[i], HEX);
     }
-    post[len] = '\0';
-    char *paramKey = post;
-    char *paramValue = post;
-    while (*paramValue) {
-      if (*paramValue == '=') {
-        paramValue++;
-        break;
+    if (i < 5) data_converter += F(":");
+  }
+  function_html.replace("MAC_ADDRESS", data_converter);
+  
+  IPAddress devIP = ETH.localIP();
+  function_html.replace("IP_ADDRESS",  devIP.toString());
+
+  mdns_name += F(".local");
+  function_html.replace("MDNS_NAME", mdns_name);
+
+  byte mod_seconds = byte((seconds) % 60);
+  byte mod_minutes = byte((seconds / 60) % 60);
+  byte mod_hours = byte((seconds / (60 * 60)) % 24);
+  int days = (seconds / (60U * 60U * 24));
+
+  function_html.replace("TIME_D", String(days, DEC));
+  function_html.replace("TIME_H", String(mod_hours, DEC));
+  function_html.replace("TIME_M", String(mod_minutes, DEC));
+  function_html.replace("TIME_S", String(mod_seconds, DEC));
+  
+  function_html.replace("ETH_T_D", String(data.ethCnt[DATA_TX], DEC));
+  function_html.replace("ETH_R_D", String(data.ethCnt[DATA_RX], DEC));
+  function_html.replace("ETH_ERROR_TCP", String(data.errorCnt[ERROR_TCP], DEC));
+  function_html.replace("ETH_TCP_PORT", String(data_config.tcpPort, DEC));
+  function_html.replace("ETH_UDP_PORT", String(data_config.udpPort, DEC));
+  function_html.replace("ETH_UDP_EN",(data_config.enableUDP) ? "Enable" : "Disable");
+  function_html.replace("RTU_OVER_EN",(data_config.enableRtuOverTcp) ? "Enable" : "Disable");
+
+  function_html.replace("RTU_T_D", String(data.rtuCnt[DATA_TX], DEC));
+  function_html.replace("RTU_R_D", String(data.rtuCnt[DATA_RX], DEC));
+
+  function_html.replace("RTU_SLAVE_OK", String(data.errorCnt[SLAVE_OK], DEC));
+  function_html.replace("RTU_SLAVE_ERROR_0X", String(data.errorCnt[SLAVE_ERROR_0X], DEC));
+  function_html.replace("RTU_SLAVE_ERROR_0A", String(data.errorCnt[SLAVE_ERROR_0A], DEC));
+  function_html.replace("RTU_SLAVE_ERROR_0B", String(data.errorCnt[SLAVE_ERROR_0B], DEC));
+  function_html.replace("RTU_ERROR_TIMEOUT", String(data.errorCnt[ERROR_TIMEOUT], DEC));
+  function_html.replace("RTU_ERROR_RTU", String(data.errorCnt[ERROR_RTU], DEC));
+
+  scan_cmd = "reset_value";
+  if(scan_cmd == webServer.arg("cnt_reset"))
+  {
+    resetStats();
+    updateEeprom();
+  }
+
+  data_converter = F("<tr><td>Modbus Slaves device<td><td> set uid max = ");
+  data_converter += String(data_config.max_slaves, DEC);
+
+  for (byte k = 1; k < data_config.max_slaves; k++) {
+    if((scanCounter > 0) && (k > scanCounter)) break;
+    for (byte s = 0; s <= SLAVE_ERROR_0B_QUEUE; s++){
+      if (getSlaveStatus(k, s) == true || k == scanCounter) 
+      {
+        data_converter += F("<tr><td><td>uid:");
+        data_converter += String(k, DEC);
+        data_converter += F("<td>");
+        if (k == scanCounter)
+        {
+          data_converter += F("Scanning...");
+          break;
+        }
+#if 1
+        if(SLAVE_OK == s) data_converter += F("Slave ok ..");
+#else
+        switch(s)
+        {
+          case SLAVE_OK:
+            data_converter += F("Slave Responded");
+            break;
+          case SLAVE_ERROR_0X:
+            data_converter += F("Slave Responded with Error (Codes 1~8)");
+            break;
+          case SLAVE_ERROR_0A:
+            data_converter += F("Gateway Overloaded (Code 10)");
+            break;
+          case SLAVE_ERROR_0B:
+          case SLAVE_ERROR_0B_QUEUE:
+            data_converter += F("Slave Failed to Respond (Code 11)");
+            break;
+        }
+#endif        
       }
-      paramValue++;
-    }
-    if (*paramValue == '\0')
-      continue;  // do not process POST parameter if there is no parameter value
-    byte paramKeyByte = strToByte(paramKey);
-    uint16_t paramValueUint = atol(paramValue);
-    switch (paramKeyByte) {
-      case POST_NONE:  // reserved, because atoi / atol returns NULL in case of error
-        break;
-#ifdef ENABLE_DHCP
-      case POST_DHCP:
-        {
-          data.config.enableDhcp = byte(paramValueUint);
-        }
-        break;
-      case POST_DNS ... POST_DNS_3:
-        {
-          data.config.dns[paramKeyByte - POST_DNS] = byte(paramValueUint);
-        }
-        break;
-#endif /* ENABLE_DHCP */
-      case POST_REQ ... POST_REQ_LAST:
-        {
-          requestLen = paramKeyByte - POST_REQ + 1;
-          request[requestLen - 1] = strToByte(paramValue);
-        }
-        break;
-      case POST_MAC ... POST_MAC_5:
-        {
-          action = ACT_RESET_ETH;  // this RESET_ETH is triggered when the user changes anything on the "IP Settings" page.
-                                   // No need to trigger RESET_ETH for other cases (POST_SUBNET, POST_GATEWAY etc.)
-                                   // if "Randomize" button is pressed, action is set to ACT_MAC
-          data.mac[paramKeyByte - POST_MAC] = strToByte(paramValue);
-        }
-        break;
-      case POST_IP ... POST_IP_3:
-        {
-          data.config.ip[paramKeyByte - POST_IP] = byte(paramValueUint);
-        }
-        break;
-      case POST_SUBNET ... POST_SUBNET_3:
-        {
-          data.config.subnet[paramKeyByte - POST_SUBNET] = byte(paramValueUint);
-        }
-        break;
-      case POST_GATEWAY ... POST_GATEWAY_3:
-        {
-          data.config.gateway[paramKeyByte - POST_GATEWAY] = byte(paramValueUint);
-        }
-        break;
-      case POST_TCP:
-        {
-          if (paramValueUint != data.config.webPort && paramValueUint != data.config.tcpPort) {  // continue only of the value changed and it differs from WebUI port
-            for (byte s = 0; s < maxSockNum; s++) {
-              if (EthernetClient(s).localPort() == data.config.tcpPort) {  // close only Modbus TCP sockets
-                disconSocket(s);
-              }
-            }
-            data.config.tcpPort = paramValueUint;
-            modbusServer = EthernetServer(data.config.tcpPort);
-          }
-        }
-        break;
-      case POST_UDP:
-        {
-          data.config.udpPort = paramValueUint;
-          Udp.stop();
-          Udp.begin(data.config.udpPort);
-        }
-        break;
-      case POST_WEB:
-        {
-          if (paramValueUint != data.config.webPort && paramValueUint != data.config.tcpPort) {  // continue only of the value changed and it differs from Modbus TCP port
-            data.config.webPort = paramValueUint;
-            action = ACT_WEB;
-          }
-        }
-        break;
-      case POST_RTU_OVER:
-        data.config.enableRtuOverTcp = byte(paramValueUint);
-        break;
-      case POST_TCP_TIMEOUT:
-        data.config.tcpTimeout = paramValueUint;
-        break;
-      case POST_BAUD:
-        {
-          action = ACT_RESET_SERIAL;  // this RESET_SERIAL is triggered when the user changes anything on the "RTU Settings" page.
-          // No need to trigger RESET_ETH for other cases (POST_DATA, POST_PARITY etc.)
-          data.config.baud = paramValueUint;
-          byte minFrameDelay = byte((frameDelay() / 1000UL) + 1);
-          if (data.config.frameDelay < minFrameDelay) {
-            data.config.frameDelay = minFrameDelay;
-          }
-        }
-        break;
-      case POST_DATA:
-        {
-          data.config.serialConfig = (data.config.serialConfig & 0xF9) | ((byte(paramValueUint) - 5) << 1);
-        }
-        break;
-      case POST_PARITY:
-        {
-          data.config.serialConfig = (data.config.serialConfig & 0xCF) | (byte(paramValueUint) << 4);
-        }
-        break;
-      case POST_STOP:
-        {
-          data.config.serialConfig = (data.config.serialConfig & 0xF7) | ((byte(paramValueUint) - 1) << 3);
-        }
-        break;
-      case POST_FRAMEDELAY:
-        data.config.frameDelay = byte(paramValueUint);
-        break;
-      case POST_TIMEOUT:
-        data.config.serialTimeout = paramValueUint;
-        break;
-      case POST_ATTEMPTS:
-        data.config.serialAttempts = byte(paramValueUint);
-        break;
-      case POST_ACTION:
-        action = action_type(paramValueUint);
-        break;
-      default:
-        break;
     }
   }
-  switch (action) {
-    case ACT_DEFAULT:
-      data.config = DEFAULT_CONFIG;
-      break;
-    case ACT_RESET_STATS:
-      resetStats();
-      break;
-    case ACT_MAC:
-      generateMac();
-      break;
-    case ACT_RESET_SERIAL:
-      clearQueue();
-      startSerial();
-      break;
-    case ACT_SCAN:
-      scanCounter = 1;
+  data_converter += F("<tr><td><td><td>none");
+  data_converter += F("<tr><td><td><td><tr><td><td><td>");
+  data_converter += F("<tr><td><td><td> <tr><td><td><td><input type=submit name=rtu_scan value='rescan_device'>");
+  
+  scan_cmd = "rescan_device";
+  if(scan_cmd == webServer.arg("rtu_scan"))
+  {
+    if(0 == scanCounter)
+    {
       memset(&slaveStatus, 0, sizeof(slaveStatus));  // clear all status flags
-      break;
-    case ACT_CLEAR_REQUEST:
-      requestLen = 0;
-      responseLen = 0;
-      break;
-    default:
-      break;
+      scanCounter = 1;
+    } 
   }
-  // if new Modbus request received, put into queue
-  if (action != ACT_SCAN && action != ACT_RESET_STATS && requestLen > 1 && queueHeaders.available() > 1 && queueData.available() > requestLen) {  // at least 2 bytes in request (slave address and function)
-    // push to queue
-    queueHeaders.push(header_t{
-      { 0x00, 0x00 },  // tid[2]
-      requestLen,      // msgLen
-      { 0, 0, 0, 0 },  // remIP[4]
-      0,               // remPort
-      UDP_REQUEST,     // requestType
-      0,               // atts
-    });
-    for (byte i = 0; i < requestLen; i++) {
-      queueData.push(request[i]);
-    }
-    responseLen = 0;  // clear old Modbus Response from WebUI
-  }
-  // new parameter values received, save them to EEPROM
-  updateEeprom();  // it is safe to call, only changed values (and changed error and data counters) are updated
+
+  function_html.replace("RTU_DEVICE_CHECK", data_converter);
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
 }
 
-/**************************************************************************/
-/*!
-  @brief Parses string and returns single byte.
-  @param myStr String (2 chars, 1 char + null or 1 null) to be parsed.
-  @return Parsed byte.
-*/
-/**************************************************************************/
-byte strToByte(const char myStr[]) {
-  if (!myStr) return 0;
-  byte x = 0;
-  for (byte i = 0; i < 2; i++) {
-    char c = myStr[i];
-    if (c >= '0' && c <= '9') {
-      x *= 16;
-      x += c - '0';
-    } else if (c >= 'A' && c <= 'F') {
-      x *= 16;
-      x += (c - 'A') + 10;
-    } else if (c >= 'a' && c <= 'f') {
-      x *= 16;
-      x += (c - 'a') + 10;
-    }
+
+void web_ip() {
+  String htmlContent = webpage;
+  String function_html = ip_page;
+  String data_converter =" ";
+
+  htmlContent.replace("PAGE_REFRESH", " ");
+
+  if(data_config.enableDhcp)
+  {
+    function_html.replace("IP_DHCP_SELECT>E", "selected >E");
   }
-  return x;
+  else
+  {
+    function_html.replace("IP_DHCP_SELECT>D", "selected >D");
+  }
+  function_html.replace("IP_DHCP_SELECT", " ");
+
+  function_html.replace("IP_SIP_A", String(data_config.ip[0],DEC));
+  function_html.replace("IP_SIP_B", String(data_config.ip[1],DEC));
+  function_html.replace("IP_SIP_C", String(data_config.ip[2],DEC));
+  function_html.replace("IP_SIP_D", String(data_config.ip[3],DEC));
+
+  function_html.replace("IP_SUBMASK_A", String(data_config.subnet[0],DEC));
+  function_html.replace("IP_SUBMASK_B", String(data_config.subnet[1],DEC));
+  function_html.replace("IP_SUBMASK_C", String(data_config.subnet[2],DEC));
+  function_html.replace("IP_SUBMASK_D", String(data_config.subnet[3],DEC));
+
+  function_html.replace("IP_GATEWAY_A", String(data_config.gateway[0],DEC));
+  function_html.replace("IP_GATEWAY_B", String(data_config.gateway[1],DEC));
+  function_html.replace("IP_GATEWAY_C", String(data_config.gateway[2],DEC));
+  function_html.replace("IP_GATEWAY_D", String(data_config.gateway[3],DEC));
+
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
 }
 
-char __printbuffer[3];
-/**************************************************************************/
-/*!
-  @brief Converts byte to char string, from https://github.com/RobTillaart/printHelpers
-  @param val Byte to be conferted.
-  @return Char string.
-*/
-/**************************************************************************/
-char *hex(byte val) {
-  char *buffer = __printbuffer;
-  byte digits = 2;
-  buffer[digits] = '\0';
-  while (digits > 0) {
-    byte v = val & 0x0F;
-    val >>= 4;
-    digits--;
-    buffer[digits] = (v < 10) ? '0' + v : ('A' - 10) + v;
+void web_ip_post() { 
+  uint16_t web_post_value;
+  IPAddress ip_data;
+  bool ip_err;
+
+  web_post_value = webServer.arg("ip_dhcp_set").toInt();
+  dbg("ip_dhcp_set = ");
+  dbgln(web_post_value);
+  switch(web_post_value)
+  {
+    case 0: data_config.enableDhcp = false; break;
+    case 1: data_config.enableDhcp = true; break;
+    default: data_config.enableDhcp = DEFAULT_DHCP_EN; break;
   }
-  return buffer;
+
+  ip_err = false;
+  web_post_value = webServer.arg("ip_sip_a").toInt();
+  dbg("ip_sip_a = ");
+  dbgln(web_post_value);
+  if((web_post_value < 1) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.ip[0] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_sip_b").toInt();
+  dbg("ip_sip_b = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.ip[1] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_sip_c").toInt();
+  dbg("ip_sip_c = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.ip[2] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_sip_d").toInt();
+  dbg("ip_sip_d = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.ip[3] = web_post_value;
+  }
+  if(ip_err) data_config.ip = DEFAULT_STATIC_IP;
+
+  ip_err = false;
+  web_post_value = webServer.arg("ip_submask_a").toInt();
+  dbg("ip_submask_a = ");
+  dbgln(web_post_value);
+  if((web_post_value < 1) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.subnet[0] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_submask_b").toInt();
+  dbg("ip_submask_b = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.subnet[1] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_submask_c").toInt();
+  dbg("ip_submask_c = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.subnet[2] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_submask_d").toInt();
+  dbg("ip_submask_d = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.subnet[3] = web_post_value;
+  }
+  if(ip_err) data_config.subnet = DEFAULT_SUBMASK;
+
+  ip_err = false;
+  web_post_value = webServer.arg("ip_geteway_a").toInt();
+  dbg("ip_geteway_a = ");
+  dbgln(web_post_value);
+  if((web_post_value < 1) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.gateway[0] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_geteway_b").toInt();
+  dbg("ip_geteway_b = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.gateway[1] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_geteway_c").toInt();
+  dbg("ip_geteway_c = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.gateway[2] = web_post_value;
+  }
+  web_post_value = webServer.arg("ip_geteway_d").toInt();
+  dbg("ip_geteway_d = ");
+  dbgln(web_post_value);
+  if((web_post_value < 0) || (web_post_value > 255))
+  {
+    ip_err = true;
+  }
+  else
+  {
+    data_config.gateway[3] = web_post_value;
+  }
+  if(ip_err) data_config.gateway = DEFAULT_GATEWAY;
+
+  eeprom_w("eeprom_c.bin", (byte *) &data_config, sizeof(data_config));
+  ee_config_out();
+
+  String htmlContent = webpage;
+  String function_html = finish_page;
+  String data_converter =" ";
+
+  htmlContent.replace("PAGE_REFRESH", " ");
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
+
+  dbgln("Restarting...");
+  delay(50);
+  ESP.restart();      
+}
+
+
+
+void web_tcp() {
+  String htmlContent = webpage;
+  String function_html = tcp_page;
+  String data_converter =" ";
+
+  htmlContent.replace("PAGE_REFRESH", " ");
+
+  function_html.replace("TCP_TCP_P", String(data_config.tcpPort,DEC));
+
+  if(data_config.enableUDP)
+  {
+    function_html.replace("TCP_UDP_SELECT>E", "selected >E");
+  }
+  else
+  {
+    function_html.replace("TCP_UDP_SELECT>D", "selected >D");
+  }
+  function_html.replace("TCP_UDP_SELECT", " ");
+
+  function_html.replace("TCP_UDP_P", String(data_config.udpPort,DEC));
+
+  function_html.replace("TCP_TIME_OUT", String(data_config.tcpTimeout,DEC));
+
+  if(data_config.enableRtuOverTcp)
+  {
+    function_html.replace("TCP_RTU_SELECT>E", "selected >E");
+  }
+  else
+  {
+    function_html.replace("TCP_RTU_SELECT>D", "selected >D");
+  }
+  function_html.replace("TCP_RTU_SELECT", " ");
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
+}
+
+void web_tcp_post() { 
+  uint16_t web_post_value;
+
+  web_post_value = webServer.arg("tcp_tcp_port").toInt();
+  dbg("tcp_tcp_port = ");
+  dbgln(web_post_value);
+  if((web_post_value < 1) || (web_post_value > 65535))
+  {
+    data_config.tcpPort =  DEFAULT_TCP_PORT;
+  }
+  else
+  {
+    data_config.tcpPort = web_post_value;
+  }
+
+  web_post_value = webServer.arg("tcp_udp_set").toInt();
+  dbg("tcp_udp_set = ");
+  dbgln(web_post_value);
+  switch(web_post_value)
+  {
+    case 0: data_config.enableUDP = false; break;
+    case 1: data_config.enableUDP = true; break;
+    default: data_config.enableUDP = DEFAULT_UDP_EN; break;
+  }
+
+  web_post_value = webServer.arg("tcp_udp_port").toInt();
+  dbg("tcp_udp_port = ");
+  dbgln(web_post_value);
+  if((web_post_value < 1) || (web_post_value > 65535))
+  {
+    data_config.udpPort =  DEFAULT_UDP_PORT;
+  }
+  else
+  {
+    data_config.udpPort = web_post_value;
+  }
+
+  web_post_value = webServer.arg("tcp_timeout").toInt();
+  dbg("tcp_timeout = ");
+  dbgln(web_post_value);
+  if((web_post_value < 1) || (web_post_value > 3600))
+  {
+    data_config.tcpTimeout =  DEFAULT_TCP_TIMEOUT;
+  }
+  else
+  {
+    data_config.tcpTimeout = web_post_value;
+  }
+
+  web_post_value = webServer.arg("tcp_rtu_set").toInt();
+  dbg("tcp_rtu_set = ");
+  dbgln(web_post_value);
+  switch(web_post_value)
+  {
+    case 0: data_config.enableRtuOverTcp = false; break;
+    case 1: data_config.enableRtuOverTcp = true; break;
+    default: data_config.enableRtuOverTcp = DEFAULT_RTU_OVER_TCP; break;
+  }
+
+  eeprom_w("eeprom_c.bin", (byte *) &data_config, sizeof(data_config));
+  ee_config_out();
+
+  String htmlContent = webpage;
+  String function_html = finish_page;
+  String data_converter =" ";
+
+  htmlContent.replace("PAGE_REFRESH", " ");
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
+
+  dbgln("Restarting...");
+  delay(50);
+  ESP.restart();      
+}
+
+
+
+void web_rtu() {
+  String htmlContent = webpage;
+  String function_html = rtu_page;
+  String data_converter =" ";
+
+  htmlContent.replace("PAGE_REFRESH", " ");
+
+  switch(data_config.baud)
+  {
+    case 3: function_html.replace("RTU_BPS_SELECT>30", "selected >30"); break;
+    case 6: function_html.replace("RTU_BPS_SELECT>60", "selected >60"); break;
+    case 9: function_html.replace("RTU_BPS_SELECT>90", "selected >90"); break;
+    case 12: function_html.replace("RTU_BPS_SELECT>12", "selected >12"); break;
+    case 24: function_html.replace("RTU_BPS_SELECT>24", "selected >24"); break;
+    case 48: function_html.replace("RTU_BPS_SELECT>48", "selected >48"); break;
+    case 96: function_html.replace("RTU_BPS_SELECT>96", "selected >96"); break;
+    case 192: function_html.replace("RTU_BPS_SELECT>19", "selected >19"); break;
+    case 384: function_html.replace("RTU_BPS_SELECT>38", "selected >38"); break;
+    case 576: function_html.replace("RTU_BPS_SELECT>57", "selected >57"); break;
+    case 1152: function_html.replace("RTU_BPS_SELECT>11", "selected >11"); break;
+  }
+  function_html.replace("RTU_BPS_SELECT", " ");
+
+  switch(data_config.serialConfig & 0x0c)
+  {
+    case 0x00: function_html.replace("RTU_DATA_SELECT>5", "selected >5"); break;
+    case 0x04: function_html.replace("RTU_DATA_SELECT>6", "selected >6"); break;
+    case 0x08: function_html.replace("RTU_DATA_SELECT>7", "selected >7"); break;
+    case 0x0c: function_html.replace("RTU_DATA_SELECT>8", "selected >8"); break;
+  }
+  function_html.replace("RTU_DATA_SELECT", " ");
+
+  switch(data_config.serialConfig & 0x03)
+  {
+    case 0x00: function_html.replace("RTU_PARITY_SELECT>N", "selected >N"); break;
+    case 0x02: function_html.replace("RTU_PARITY_SELECT>E", "selected >E"); break;
+    case 0x03: function_html.replace("RTU_PARITY_SELECT>O", "selected >O"); break;
+  }
+  function_html.replace("RTU_PARITY_SELECT", " ");
+
+  if(data_config.serialConfig & 0x20)
+  {
+    function_html.replace("RTU_STOP_SELECT>2", "selected >2");
+  }
+  else
+  {
+    function_html.replace("RTU_STOP_SELECT>1", "selected >1");
+  }
+  function_html.replace("RTU_STOP_SELECT", " ");
+
+  function_html.replace("RTU_SMA_VAL", String(data_config.max_slaves,DEC));
+  function_html.replace("RTU_IFD_VAL", String(data_config.frameDelay,DEC));
+  function_html.replace("RTU_RT_VAL", String(data_config.serialTimeout,DEC));
+  function_html.replace("RTU_ATTEMPTS_VAL", String(data_config.serialAttempts,DEC));
+
+  if(data_config.enableBootScan)
+  {
+    function_html.replace("RTU_BS_SELECT>E", "selected >E");
+  }
+  else
+  {
+    function_html.replace("RTU_BS_SELECT>D", "selected >D");
+  }
+  function_html.replace("RTU_BS_SELECT", " ");  
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
+}
+
+void web_rtu_post() { 
+  uint16_t web_post_value;
+
+  web_post_value = webServer.arg("rtu_bps_set").toInt();
+  dbg("rtu_bps_set = ");
+  dbgln(web_post_value);
+  switch(web_post_value)
+  {
+    case 0: data_config.baud = 3; break;
+    case 1: data_config.baud = 6; break;
+    case 2: data_config.baud = 9; break;
+    case 3: data_config.baud = 12; break;
+    case 4: data_config.baud = 24; break;
+    case 5: data_config.baud = 48; break;
+    case 6: data_config.baud = 96; break;
+    case 7: data_config.baud = 192; break;
+    case 8: data_config.baud = 384; break;
+    case 9: data_config.baud = 576; break;
+    case 10: data_config.baud = 1152; break;
+    default: data_config.baud = 96; break;
+  }
+
+  data_config.serialConfig &= ~0x3f;
+
+  web_post_value = webServer.arg("rtu_data_set").toInt();
+  dbg("rtu_data_set = ");
+  dbgln(web_post_value);
+  switch(web_post_value)
+  {
+    case 5: data_config.serialConfig |= 0x00; break;
+    case 6: data_config.serialConfig |= 0x04; break;
+    case 7: data_config.serialConfig |= 0x08; break;
+    case 8: data_config.serialConfig |= 0x0c; break;
+    default: data_config.serialConfig |= 0x0c; break;
+  }
+
+  web_post_value = webServer.arg("rtu_parity_set").toInt();
+  dbg("rtu_parity_set = ");
+  dbgln(web_post_value);
+  switch(web_post_value)
+  {
+    case 0: data_config.serialConfig |= 0x00; break;
+    case 2: data_config.serialConfig |= 0x02; break;
+    case 3: data_config.serialConfig |= 0x03; break;
+    default: data_config.serialConfig |= 0x00; break;
+  }
+
+  web_post_value = webServer.arg("rtu_stop_set").toInt();
+  dbg("rtu_stop_set = ");
+  dbgln(web_post_value);
+  switch(web_post_value)
+  {
+    case 1: data_config.serialConfig |= 0x10; break;
+    case 3: data_config.serialConfig |= 0x30; break;
+    default: data_config.serialConfig |= 0x10; break;
+  }
+
+  web_post_value = webServer.arg("rtu_sma").toInt();
+  dbg("rtu_sma = ");
+  dbgln(web_post_value);
+  if((web_post_value < 1) || (web_post_value > 247))
+  {
+    data_config.max_slaves =  MAX_SLAVES;
+  }
+  else
+  {
+    data_config.max_slaves = web_post_value;
+  }
+
+  web_post_value = webServer.arg("rtu_ifd").toInt();
+  dbg("rtu_ifd = ");
+  dbgln(web_post_value);
+  if((web_post_value < 5) || (web_post_value > 250))
+  {
+    data_config.frameDelay =  DEFAULT_FRAME_DELAY;
+  }
+  else
+  {
+    data_config.frameDelay = web_post_value;
+  }
+
+  web_post_value = webServer.arg("rtu_rt").toInt();
+  dbg("rtu_rt = ");
+  dbgln(web_post_value);
+  if((web_post_value < 50) || (web_post_value > 5000))
+  {
+    data_config.serialTimeout =  DEFAULT_RESPONSE_TIMEPOUT;
+  }
+  else
+  {
+    data_config.serialTimeout = web_post_value;
+  }
+
+  web_post_value = webServer.arg("rtu_attempts").toInt();
+  dbg("rtu_attempts = ");
+  dbgln(web_post_value);
+  if((web_post_value < 1) || (web_post_value > 5))
+  {
+    data_config.serialAttempts =  DEFAULT_ATTEMPTS;
+  }
+  else
+  {
+    data_config.serialAttempts = web_post_value;
+  }
+
+  web_post_value = webServer.arg("rtu_boot_scan_set").toInt();
+  dbg("rtu_boot_scan_set = ");
+  dbgln(web_post_value);
+  switch(web_post_value)
+  {
+    case 0: data_config.enableBootScan = false; break;
+    case 1: data_config.enableBootScan = true; break;
+    default: data_config.enableBootScan = DEFAULT_BOOTSCAN_EN; break;
+  }
+
+  eeprom_w("eeprom_c.bin", (byte *) &data_config, sizeof(data_config));
+  ee_config_out();
+
+  String htmlContent = webpage;
+  String function_html = finish_page;
+  String data_converter =" ";
+
+  htmlContent.replace("PAGE_REFRESH", " ");
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
+
+  dbgln("Restarting...");
+  delay(50);
+  ESP.restart();      
+}
+
+
+
+void web_tools() {
+  String htmlContent = webpage;
+  String function_html = tools_page;
+  String data_converter =" ";
+
+  htmlContent.replace("PAGE_REFRESH", " ");
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
+}
+
+void web_tools_post() { 
+
+  resetStats();
+  data_config = DEFAULT_CONFIG;
+  eeprom_w("eeprom_b.bin", (byte *) &data, sizeof(data));
+  eeprom_w("eeprom_c.bin", (byte *) &data_config, sizeof(data_config));
+
+  ee_data_out();
+  ee_config_out();
+
+  String htmlContent = webpage;
+  String function_html = finish_page;
+  String data_converter =" ";
+
+  htmlContent.replace("PAGE_REFRESH", " ");
+
+  htmlContent.replace("FUNCTION_DATA", function_html);
+  
+  webServer.send(200, "text/html", htmlContent);
+
+  dbgln("Restarting...");
+  delay(50);
+  ESP.restart();      
+}
+
+
+
+void startWeb() {
+  webServer.on("/", HTTP_GET, web_status);
+  webServer.on("/status.htm", HTTP_GET, web_status);
+  webServer.on("/status.htm", HTTP_POST, web_status);  
+
+  webServer.on("/ip.htm", HTTP_GET, web_ip);
+  webServer.on("/ip_post", HTTP_POST, web_ip_post);
+
+  webServer.on("/tcp.htm", HTTP_GET, web_tcp);
+  webServer.on("/tcp_post", HTTP_POST, web_tcp_post);
+
+  webServer.on("/rtu.htm", HTTP_GET, web_rtu);
+  webServer.on("/rtu_post", HTTP_POST, web_rtu_post);
+
+  webServer.on("/tools.htm", HTTP_GET, web_tools);
+  webServer.on("/tools_post", HTTP_POST, web_tools_post);
+
+  webServer.onNotFound(handleNotFound);
+}
+
+void recvWeb() {
+  webServer.handleClient();
 }

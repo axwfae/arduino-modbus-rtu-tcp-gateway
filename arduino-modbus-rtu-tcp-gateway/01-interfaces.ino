@@ -4,7 +4,40 @@
 */
 /**************************************************************************/
 void startSerial() {
-  mySerial.begin((data.config.baud * 100UL), data.config.serialConfig);
+#ifdef DEBUG
+
+  dbgln(F(" "));
+  
+  dbg(F("rtu mode set = "));
+  dbg((data_config.baud * 100UL));
+  dbg((" "));
+  switch(data_config.serialConfig & 0x0c)
+  {
+    case 0x00: dbg(F("-5")); break;
+    case 0x04: dbg(F("-6")); break;
+    case 0x08: dbg(F("-7")); break;
+    case 0x0c: dbg(F("-8")); break;
+  }
+  switch(data_config.serialConfig & 0x03)
+  {
+    case 0x00: dbg(F("-N-")); break;
+    case 0x02: dbg(F("-E-")); break;
+    case 0x03: dbg(F("-O-")); break;
+  }
+
+  if(data_config.serialConfig & 0x20)
+  {
+    dbgln(F("2 "));
+  }
+  else
+  {
+    dbgln(F("1 "));
+  }
+
+#endif
+
+  mySerial.begin((data_config.baud * 100UL), data_config.serialConfig, mySerial_rx_pin, mySerial_tx_pin);
+
 #ifdef RS485_CONTROL_PIN
   pinMode(RS485_CONTROL_PIN, OUTPUT);
   digitalWrite(RS485_CONTROL_PIN, RS485_RECEIVE);  // Init Transceiver
@@ -15,16 +48,47 @@ void startSerial() {
 byte bitsPerChar() {
   byte bits =
     1 +                                                         // start bit
-    (((data.config.serialConfig & 0x06) >> 1) + 5) +            // data bits
-    (((data.config.serialConfig & 0x08) >> 3) + 1);             // stop bits
-  if (((data.config.serialConfig & 0x30) >> 4) > 1) bits += 1;  // parity bit (if present)
+    (((data_config.serialConfig & 0x0c) >> 2) + 5) +            // data bits
+    (((data_config.serialConfig & 0x20) >> 5) + 1);             // stop bits
+  if ((data_config.serialConfig & 0x03) > 1) bits += 1;         // parity bit (if present)
   return bits;
 }
 
+/*
+  arduino-esp32/blob/master/cores/esp32/HardwareSerial.h
+  xx xx xx
+   s  d  p
+
+  SERIAL_5N1 = 0x8000010,
+  SERIAL_6N1 = 0x8000014,
+  SERIAL_7N1 = 0x8000018,
+  SERIAL_8N1 = 0x800001c,
+  SERIAL_5N2 = 0x8000030,
+  SERIAL_6N2 = 0x8000034,
+  SERIAL_7N2 = 0x8000038,
+  SERIAL_8N2 = 0x800003c,
+  SERIAL_5E1 = 0x8000012,
+  SERIAL_6E1 = 0x8000016,
+  SERIAL_7E1 = 0x800001a,
+  SERIAL_8E1 = 0x800001e,
+  SERIAL_5E2 = 0x8000032,
+  SERIAL_6E2 = 0x8000036,
+  SERIAL_7E2 = 0x800003a,
+  SERIAL_8E2 = 0x800003e,
+  SERIAL_5O1 = 0x8000013,
+  SERIAL_6O1 = 0x8000017,
+  SERIAL_7O1 = 0x800001b,
+  SERIAL_8O1 = 0x800001f,
+  SERIAL_5O2 = 0x8000033,
+  SERIAL_6O2 = 0x8000037,
+  SERIAL_7O2 = 0x800003b,
+  SERIAL_8O2 = 0x800003f
+*/
+
 // Character timeout in micros
 uint32_t charTimeOut() {
-  if (data.config.baud <= 192) {
-    return (15000UL * bitsPerChar()) / data.config.baud;  // inter-character time-out should be 1,5T
+  if (data_config.baud <= 192) {
+    return (15000UL * bitsPerChar()) / data_config.baud;  // inter-character time-out should be 1,5T
   } else {
     return 750;
   }
@@ -32,12 +96,49 @@ uint32_t charTimeOut() {
 
 // Minimum frame delay in micros
 uint32_t frameDelay() {
-  if (data.config.baud <= 192) {
-    return (35000UL * bitsPerChar()) / data.config.baud;  // inter-frame delay should be 3,5T
+  if (data_config.baud <= 192) {
+    return (35000UL * bitsPerChar()) / data_config.baud;  // inter-frame delay should be 3,5T
   } else {
     return 1750;  // 1750 μs
   }
 }
+
+
+static bool eth_connected = false;
+
+void onEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_ETH_START:
+      dbgln(F("ETH Started"));
+      //set eth hostname here
+      ETH.setHostname("esp32-eth0");
+      break;
+    case ARDUINO_EVENT_ETH_CONNECTED: 
+		  dbgln(F("ETH Connected")); 
+		  break;
+    case ARDUINO_EVENT_ETH_GOT_IP:
+		  dbgln(F(""));
+		  dbg(F("ETH Got IP:"));
+		  dbgln(esp_netif_get_desc(info.got_ip.esp_netif)); 
+      eth_connected = true;
+      break;
+    case ARDUINO_EVENT_ETH_LOST_IP:
+      dbgln(F("ETH Lost IP"));
+      eth_connected = false;
+      break;
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+      dbgln(F("ETH Disconnected"));
+      eth_connected = false;
+      break;
+    case ARDUINO_EVENT_ETH_STOP:
+      dbgln(F("ETH Stopped"));
+      eth_connected = false;
+      break;
+    default: break;
+  }
+}
+
+
 
 /**************************************************************************/
 /*!
@@ -46,62 +147,107 @@ uint32_t frameDelay() {
 */
 /**************************************************************************/
 void startEthernet() {
-#ifdef ETH_RESET_PIN
-  pinMode(ETH_RESET_PIN, OUTPUT);
-  digitalWrite(ETH_RESET_PIN, LOW);
-  delay(25);
-  digitalWrite(ETH_RESET_PIN, HIGH);
-  delay(ETH_RESET_DELAY);
-#endif
+
+  Network.onEvent(onEvent);
+
+  SPI.begin(ETH_SPI_SCK, ETH_SPI_MISO, ETH_SPI_MOSI);
+  ETH.begin(ETH_DEV_TYPE, ETH_PHY_ADDR, ETH_DEV_CS, ETH_DEV_IRQ, ETH_DEV_RST, SPI, ETH_SPI_FREQ_MHZ);
 
 #ifdef ENABLE_DHCP
-  dhcpSuccess = false;
-  if (data.config.enableDhcp) {
-    dhcpSuccess = Ethernet.begin(data.mac);
+  if(data_config.enableDhcp)
+  {
+    dbgln(F("eth use dhcp mode."));
   }
-  if (!dhcpSuccess) {
-    Ethernet.begin(data.mac, data.config.ip, data.config.dns, data.config.gateway, data.config.subnet);
-  }
-#else  /* ENABLE_DHCP */
-  Ethernet.begin(data.mac, data.config.ip, {}, data.config.gateway, data.config.subnet);  // No DNS
-#endif /* ENABLE_DHCP */
+  else
+#endif  
+  {
+    dbgln(F("eth use static ip mode."));
 
-  W5100.setRetransmissionTime(TCP_RETRANSMISSION_TIMEOUT);
-  W5100.setRetransmissionCount(TCP_RETRANSMISSION_COUNT);
-  modbusServer = EthernetServer(data.config.tcpPort);
-  webServer = EthernetServer(data.config.webPort);
-  Udp.begin(data.config.udpPort);
-  modbusServer.begin();
-  webServer.begin();
-#if MAX_SOCK_NUM > 4
-  if (W5100.getChip() == 51) maxSockNum = 4;  // W5100 chip never supports more than 4 sockets
-#endif
-}
-
-/**************************************************************************/
-/*!
-  @brief Resets Arduino (works only on AVR chips).
-*/
-/**************************************************************************/
-void (*resetFunc)(void) = 0;  //declare reset function at address 0
-
-/**************************************************************************/
-/*!
-  @brief Checks SPI connection to the W5X00 chip.
-*/
-/**************************************************************************/
-void checkEthernet() {
-  static byte attempts = 0;
-  IPAddress tempIP = Ethernet.localIP();
-  if (tempIP[0] == 0) {
-    attempts++;
-    if (attempts >= 3) {
-      resetFunc();
+    if (false == ETH.config(data_config.ip, data_config.subnet, data_config.gateway))
+    {
+      dbgln(F("eth failed set static"));
     }
-  } else {
-    attempts = 0;
   }
-  checkEthTimer.sleep(CHECK_ETH_INTERVAL);
+
+  while(false == eth_connected)
+  {
+    delay(500);
+    dbg(F("."));
+  }
+
+
+  dbgln(F(""));
+  dbg(F("code ver = "));
+  dbg(VERSION[0]);
+  dbg(F("."));
+  dbgln(VERSION[1]);
+
+  dbgln(F(""));
+  dbg(F("ETH mac address:"));
+  byte macBuffer[6];
+  ETH.macAddress(macBuffer);
+  for (byte i = 0; i < 6; i++) {
+    if (macBuffer[i] < 16) dbg(F("0"));
+    dbg(String(macBuffer[i], HEX));
+    if (i < 5) dbg(F(":"));
+  }
+
+  dbgln(F(""));
+  dbgln(F(""));
+  dbgln(F("ETH connected"));
+  dbg(F("IP address: "));
+  dbgln(ETH.localIP());
+  dbg(F("Subnet mask: "));
+  dbgln(ETH.subnetMask());
+  dbg(F("Gateway IP: "));
+  dbgln(ETH.gatewayIP()); 
+
+#ifdef ENABLE_DHCP
+  if(data_config.enableDhcp)
+  {
+    data_config.ip = ETH.localIP();
+    data_config.subnet = ETH.subnetMask();
+    data_config.gateway = ETH.gatewayIP();
+  }
+#endif
+
+#if 0
+  if(nullptr != modbusServer_ptr)
+  {
+    modbusServer_ptr->end();
+    delete modbusServer_ptr;
+    modbusServer_ptr = nullptr;
+  }
+#endif
+
+  modbusServer_ptr = new NetworkServer(data_config.tcpPort);
+  modbusServer_ptr->begin();
+
+  if(data_config.enableUDP)
+    modbusServer_UDP.begin(data_config.udpPort);
+
+#ifdef ENABLE_EXTENDED_WEBUI
+  webServer.begin();
+  startWeb();
+#endif
+
+  String mdns_name =DEFAULT_mDns_NAME_HEAD;
+  for (byte i = 3; i < 6; i++) {
+    if (macBuffer[i] < 16) mdns_name += F("0");
+    mdns_name += String(macBuffer[i], HEX);
+  }
+
+  if (MDNS.begin(mdns_name)) {
+    dbg(F("mDns ="));
+    dbg(mdns_name);
+    dbgln(F(".local"));
+  }
+  else
+  {
+    dbgln(F("mDns fail..!!"));
+  }
+
+  dbgln(F("[arduino] Server available at http://"));
 }
 
 /**************************************************************************/
@@ -164,23 +310,6 @@ void resetStats() {
 #endif /* ENABLE_EXTENDED_WEBUI */
 }
 
-/**************************************************************************/
-/*!
-  @brief Generate random MAC using pseudo random generator,
-  bytes 0, 1 and 2 are static (MAC_START), bytes 3, 4 and 5 are generated randomly
-*/
-/**************************************************************************/
-void generateMac() {
-  // Marsaglia algorithm from https://github.com/RobTillaart/randomHelpers
-  seed1 = 36969L * (seed1 & 65535L) + (seed1 >> 16);
-  seed2 = 18000L * (seed2 & 65535L) + (seed2 >> 16);
-  uint32_t randomBuffer = (seed1 << 16) + seed2; /* 32-bit random */
-  memcpy(data.mac, MAC_START, 3);                // set first 3 bytes
-  for (byte i = 0; i < 3; i++) {
-    data.mac[i + 3] = randomBuffer & 0xFF;  // random last 3 bytes
-    randomBuffer >>= 8;
-  }
-}
 
 /**************************************************************************/
 /*!
@@ -190,12 +319,15 @@ void generateMac() {
 void updateEeprom() {
   eepromTimer.sleep(EEPROM_INTERVAL * 60UL * 60UL * 1000UL);  // EEPROM_INTERVAL is in hours, sleep is in milliseconds!
   data.eepromWrites++;                                        // we assume that at least some bytes are written to EEPROM during EEPROM.update or EEPROM.put
-  EEPROM.put(DATA_START, data);
+
+  eeprom_w("eeprom_b.bin", (byte *) &data, sizeof(data));
+
+  ee_data_out();
 }
 
 
-uint32_t lastSocketUse[MAX_SOCK_NUM];
-byte socketInQueue[MAX_SOCK_NUM];
+//uint32_t lastSocketUse[MAX_SOCK_NUM];
+//byte socketInQueue[MAX_SOCK_NUM];
 /**************************************************************************/
 /*!
   @brief Closes sockets which are waiting to be closed or which refuse to close,
@@ -206,222 +338,164 @@ byte socketInQueue[MAX_SOCK_NUM];
 */
 /**************************************************************************/
 void manageSockets() {
-  uint32_t maxAge = 0;         // the 'age' of the socket in a 'disconnectable' state that was last used the longest time ago
-  byte oldest = MAX_SOCK_NUM;  // the socket number of the 'oldest' disconnectable socket
-  byte modbusListening = MAX_SOCK_NUM;
-  byte webListening = MAX_SOCK_NUM;
-  byte dataAvailable = MAX_SOCK_NUM;
-  byte socketsAvailable = 0;
-  SPI.beginTransaction(SPI_ETHERNET_SETTINGS);  // begin SPI transaction
-  // look at all the hardware sockets, record and take action based on current states
-  for (byte s = 0; s < maxSockNum; s++) {            // for each hardware socket ...
-    byte status = W5100.readSnSR(s);                 //  get socket status...
-    uint32_t sockAge = millis() - lastSocketUse[s];  // age of the current socket
-    if (socketInQueue[s] > 0) {
-      lastSocketUse[s] = millis();
-      continue;  // do not close Modbus TCP sockets currently processed (in queue)
-    }
-
-    switch (status) {
-      case SnSR::CLOSED:
-        {
-          socketsAvailable++;
-        }
-        break;
-      case SnSR::LISTEN:
-      case SnSR::SYNRECV:
-        {
-          lastSocketUse[s] = millis();
-          if (W5100.readSnPORT(s) == data.config.webPort) {
-            webListening = s;
-          } else {
-            modbusListening = s;
-          }
-        }
-        break;
-      case SnSR::FIN_WAIT:
-      case SnSR::CLOSING:
-      case SnSR::TIME_WAIT:
-      case SnSR::LAST_ACK:
-        {
-          socketsAvailable++;                  // socket will be available soon
-          if (sockAge > TCP_DISCON_TIMEOUT) {  //     if it's been more than TCP_CLIENT_DISCON_TIMEOUT since disconnect command was sent...
-            W5100.execCmdSn(s, Sock_CLOSE);    //	    send CLOSE command...
-            lastSocketUse[s] = millis();       //       and record time at which it was sent so we don't do it repeatedly.
-          }
-        }
-        break;
-      case SnSR::ESTABLISHED:
-      case SnSR::CLOSE_WAIT:
-        {
-          if (EthernetClient(s).available() > 0) {
-            dataAvailable = s;
-            lastSocketUse[s] = millis();
-          } else {
-            // remote host closed connection, our end still open
-            if (status == SnSR::CLOSE_WAIT) {
-              socketsAvailable++;               // socket will be available soon
-              W5100.execCmdSn(s, Sock_DISCON);  //  send DISCON command...
-              lastSocketUse[s] = millis();      //   record time at which it was sent...
-                                                // status becomes LAST_ACK for short time
-            } else if (((W5100.readSnPORT(s) == data.config.webPort && sockAge > WEB_IDLE_TIMEOUT)
-                        || (W5100.readSnPORT(s) == data.config.tcpPort && sockAge > (data.config.tcpTimeout * 1000UL)))
-                       && sockAge > maxAge) {
-              oldest = s;        //     record the socket number...
-              maxAge = sockAge;  //      and make its age the new max age.
-            }
-          }
-        }
-        break;
-      default:
-        break;
+  if(!modbusServer_TCP)
+  {
+    if(modbusServer_ptr->hasClient())
+    {
+      modbusServer_TCP = modbusServer_ptr->available();
+      //modbusServer_TCP.flush();
+      dbgln("TCP Connected");
     }
   }
+   
+  if(modbusServer_TCP) recvTcp();  
 
-  if (dataAvailable != MAX_SOCK_NUM) {
-    EthernetClient client = EthernetClient(dataAvailable);
-    if (W5100.readSnPORT(dataAvailable) == data.config.webPort) {
-      recvWeb(client);
-    } else {
-      recvTcp(client);
-    }
-  }
+  if(data_config.enableUDP) recvUdp();
 
-  if (modbusListening == MAX_SOCK_NUM) {
-    modbusServer.begin();
-  } else if (webListening == MAX_SOCK_NUM) {
-    webServer.begin();
-  }
-
-  // If needed, disconnect socket that's been idle (ESTABLISHED without data recieved) the longest
-  if (oldest != MAX_SOCK_NUM && socketsAvailable == 0 && (webListening == MAX_SOCK_NUM || modbusListening == MAX_SOCK_NUM)) {
-    disconSocket(oldest);
-  }
-
-  SPI.endTransaction();  // Serves to o release the bus for other devices to access it. Since the ethernet chip is the only device
-  // we do not need SPI.beginTransaction(SPI_ETHERNET_SETTINGS) or SPI.endTransaction() ??
+#ifdef ENABLE_EXTENDED_WEBUI    
+  recvWeb();
+#endif    
 }
 
-/**************************************************************************/
-/*!
-  @brief Disconnect or close a socket.
-  @param s Socket number.
-*/
-/**************************************************************************/
-void disconSocket(byte s) {
-  if (W5100.readSnSR(s) == SnSR::ESTABLISHED) {
-    W5100.execCmdSn(s, Sock_DISCON);  // Sock_DISCON does not close LISTEN sockets
-    lastSocketUse[s] = millis();      //   record time at which it was sent...
-  } else {
-    W5100.execCmdSn(s, Sock_CLOSE);  //  send DISCON command...
+void debug_hex(byte *hex_data, byte len, bool ln_en)
+{
+  byte cnt;
+
+  for(cnt = 0; cnt < len; cnt++)
+  {
+    if (hex_data[cnt] < 16) dbg(F("0"));
+    dbg(String(hex_data[cnt], HEX));
+    dbg(F(" "));
   }
+  if(ln_en) dbgln(F(" "));
 }
 
 
-/**************************************************************************/
-/*!
-  @brief Seed pseudorandom generator using  watch dog timer interrupt (works only on AVR).
-  See https://sites.google.com/site/astudyofentropy/project-definition/timer-jitter-entropy-sources/entropy-library/arduino-random-seed
-*/
-/**************************************************************************/
-void CreateTrulyRandomSeed() {
-  seed1 = 0;
-  nrot = 32;  // Must be at least 4, but more increased the uniformity of the produced seeds entropy.
-  // The following five lines of code turn on the watch dog timer interrupt to create
-  // the seed value
-  cli();
-  MCUSR = 0;
-  _WD_CONTROL_REG |= (1 << _WD_CHANGE_BIT) | (1 << WDE);
-  _WD_CONTROL_REG = (1 << WDIE);
-  sei();
-  while (nrot > 0)
-    ;  // wait here until seed is created
-  // The following five lines turn off the watch dog timer interrupt
-  cli();
-  MCUSR = 0;
-  _WD_CONTROL_REG |= (1 << _WD_CHANGE_BIT) | (0 << WDE);
-  _WD_CONTROL_REG = (0 << WDIE);
-  sei();
+void ee_data_out()
+{
+  dbgln(F(""));
+  dbgln(F("=== def ==="));
+  dbg(F("eepromWrites ="))
+  dbgln(data.eepromWrites);
+  
+  dbg(F("major ="))
+  dbgln(data.major);
+  
+  dbgln(F("=== cnt ==="));
+
+  dbg(F("SLAVE_OK ="))
+  dbgln(data.errorCnt[SLAVE_OK]);
+  dbg(F("SLAVE_ERROR_0X ="))
+  dbgln(data.errorCnt[SLAVE_ERROR_0X]);
+  dbg(F("SLAVE_ERROR_0A ="))
+  dbgln(data.errorCnt[SLAVE_ERROR_0A]);
+  dbg(F("SLAVE_ERROR_0B ="))
+  dbgln(data.errorCnt[SLAVE_ERROR_0B]);
+  dbg(F("SLAVE_ERROR_0B_QUEUE ="))
+  dbgln(data.errorCnt[SLAVE_ERROR_0B_QUEUE]);
+  dbg(F("ERROR_TIMEOUT ="))
+  dbgln(data.errorCnt[ERROR_TIMEOUT]);
+  dbg(F("ERROR_RTU ="))
+  dbgln(data.errorCnt[ERROR_RTU]);
+  dbg(F("ERROR_TCP ="))
+  dbgln(data.errorCnt[ERROR_TCP]);
+
+  dbg(F("rtuCnt DATA_TX ="))
+  dbgln(data.rtuCnt[DATA_TX]);
+  dbg(F("rtuCnt DATA_RX ="))
+  dbgln(data.rtuCnt[DATA_RX]);
+  dbg(F("ethCnt DATA_TX ="))
+  dbgln(data.ethCnt[DATA_TX]);
+  dbg(F("ethCnt DATA_RX ="))
+  dbgln(data.ethCnt[DATA_RX]);
+
+  dbgln(F("=== end ==="));
 }
 
-ISR(WDT_vect) {
-  nrot--;
-  seed1 = seed1 << 8;
-  seed1 = seed1 ^ TCNT1L;
+
+void ee_config_out()
+{
+  dbgln(F(""));
+  dbgln(F("=== config ==="));
+  dbg(F("enableDhcp ="))
+  dbgln(data_config.enableDhcp);
+  dbg(F("ip ="))
+  dbgln(data_config.ip);
+  dbg(F("subnet ="))
+  dbgln(data_config.subnet);
+  dbg(F("gateway ="))
+  dbgln(data_config.gateway);
+  dbg(F("tcpPort ="))
+  dbgln(data_config.tcpPort);
+  dbg(F("enableUDP ="))
+  dbgln(data_config.enableUDP);
+  dbg(F("udpPort ="))
+  dbgln(data_config.udpPort);
+  dbg(F("tcpTimeout ="))
+  dbgln(data_config.tcpTimeout);
+  dbg(F("enableRtuOverTcp ="))
+  dbgln(data_config.enableRtuOverTcp);
+  dbg(F("baud ="))
+  dbgln(data_config.baud);
+  dbg(F("serialConfig ="))
+  dbgln(data_config.serialConfig);
+  dbg(F("frameDelay ="))
+  dbgln(data_config.frameDelay);
+  dbg(F("serialTimeout ="))
+  dbgln(data_config.serialTimeout);
+  dbg(F("serialAttempts ="))
+  dbgln(data_config.serialAttempts);
+  dbg(F("enableBootScan ="))
+  dbgln(data_config.enableBootScan);
+  dbg(F("max_slaves ="))
+  dbgln(data_config.max_slaves);
+  dbgln(F("=== end ==="));
 }
 
-// Preprocessor code for identifying microcontroller board
-#if defined(TEENSYDUINO)
-//  --------------- Teensy -----------------
-#if defined(__AVR_ATmega32U4__)
-#define BOARD F("Teensy 2.0")
-#elif defined(__AVR_AT90USB1286__)
-#define BOARD F("Teensy++ 2.0")
-#elif defined(__MK20DX128__)
-#define BOARD F("Teensy 3.0")
-#elif defined(__MK20DX256__)
-#define BOARD F("Teensy 3.2")  // and Teensy 3.1 (obsolete)
-#elif defined(__MKL26Z64__)
-#define BOARD F("Teensy LC")
-#elif defined(__MK64FX512__)
-#define BOARD F("Teensy 3.5")
-#elif defined(__MK66FX1M0__)
-#define BOARD F("Teensy 3.6")
-#else
-#define BOARD F("Unknown Board")
-#endif
-#else  // --------------- Arduino ------------------
-#if defined(ARDUINO_AVR_ADK)
-#define BOARD F("Arduino Mega Adk")
-#elif defined(ARDUINO_AVR_BT)  // Bluetooth
-#define BOARD F("Arduino Bt")
-#elif defined(ARDUINO_AVR_DUEMILANOVE)
-#define BOARD F("Arduino Duemilanove")
-#elif defined(ARDUINO_AVR_ESPLORA)
-#define BOARD F("Arduino Esplora")
-#elif defined(ARDUINO_AVR_ETHERNET)
-#define BOARD F("Arduino Ethernet")
-#elif defined(ARDUINO_AVR_FIO)
-#define BOARD F("Arduino Fio")
-#elif defined(ARDUINO_AVR_GEMMA)
-#define BOARD F("Arduino Gemma")
-#elif defined(ARDUINO_AVR_LEONARDO)
-#define BOARD F("Arduino Leonardo")
-#elif defined(ARDUINO_AVR_LILYPAD)
-#define BOARD F("Arduino Lilypad")
-#elif defined(ARDUINO_AVR_LILYPAD_USB)
-#define BOARD F("Arduino Lilypad Usb")
-#elif defined(ARDUINO_AVR_MEGA)
-#define BOARD F("Arduino Mega")
-#elif defined(ARDUINO_AVR_MEGA2560)
-#define BOARD F("Arduino Mega 2560")
-#elif defined(ARDUINO_AVR_MICRO)
-#define BOARD F("Arduino Micro")
-#elif defined(ARDUINO_AVR_MINI)
-#define BOARD F("Arduino Mini")
-#elif defined(ARDUINO_AVR_NANO)
-#define BOARD F("Arduino Nano")
-#elif defined(ARDUINO_AVR_NG)
-#define BOARD F("Arduino NG")
-#elif defined(ARDUINO_AVR_PRO)
-#define BOARD F("Arduino Pro")
-#elif defined(ARDUINO_AVR_ROBOT_CONTROL)
-#define BOARD F("Arduino Robot Ctrl")
-#elif defined(ARDUINO_AVR_ROBOT_MOTOR)
-#define BOARD F("Arduino Robot Motor")
-#elif defined(ARDUINO_AVR_UNO)
-#define BOARD F("Arduino Uno")
-#elif defined(ARDUINO_AVR_YUN)
-#define BOARD F("Arduino Yun")
+bool eeprom_r(String pFilename, byte *pData, word wSize)
+{
+  File fsSaveFile;
 
-// These boards must be installed separately:
-#elif defined(ARDUINO_SAM_DUE)
-#define BOARD F("Arduino Due")
-#elif defined(ARDUINO_SAMD_ZERO)
-#define BOARD F("Arduino Zero")
-#elif defined(ARDUINO_ARC32_TOOLS)
-#define BOARD F("Arduino 101")
-#else
-#define BOARD F("Unknown Board")
-#endif
-#endif
+  if (!pFilename.startsWith("/")) {
+    pFilename = "/" + pFilename;
+  }
+
+  fsSaveFile = SPIFFS.open(pFilename.c_str(), FILE_READ);
+  if (fsSaveFile)
+  {
+    fsSaveFile.readBytes((char *)pData, wSize);
+    fsSaveFile.close();
+    return true;
+  }
+  else
+  {
+    dbg(pFilename);
+    dbgln(F(" read fail.."));
+    fsSaveFile.close();
+    return false;
+  }
+}
+
+bool eeprom_w(String pFilename, byte *pData, word wSize)
+{
+  File fsSaveFile;
+
+  if (!pFilename.startsWith("/")) {
+    pFilename = "/" + pFilename;
+  }
+
+  fsSaveFile = SPIFFS.open(pFilename.c_str(), FILE_WRITE);
+  if (fsSaveFile)
+  {
+    fsSaveFile.write(pData, wSize);
+    fsSaveFile.close();
+    return true;
+  }
+  else
+  {
+    dbg(pFilename);
+    dbgln(F(" write  fail.."));
+    fsSaveFile.close();
+    return false;
+  }
+}
